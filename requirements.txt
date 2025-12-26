@@ -1,14 +1,4 @@
-# UI & data
 streamlit>=1.36.0
 pandas>=2.2.0
 numpy>=1.26.0
 openpyxl>=3.1.2
-plotly>=5.22.0
-
-# Images & vision
-Pillow>=10.3.0
-opencv-python-headless>=4.9.0.80
-
-# PyTorch (CPU par défaut — compatible Mask R-CNN)
-torch>=2.2,<2.5
-torchvision>=0.17,<0.20
