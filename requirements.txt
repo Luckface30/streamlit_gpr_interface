@@ -3,9 +3,12 @@ pandas>=2.2.0
 numpy>=1.26.0
 openpyxl>=3.1.2
 requests>=2.31.0
-opencv-python-headless>=4.9.0.80
+
+# Vision (OBLIGATOIRE pour cv2)
+opencv-python-headless==4.9.0.80
 Pillow>=10.3.0
 
+# Torch CPU
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.3.1
 torchvision==0.18.1
