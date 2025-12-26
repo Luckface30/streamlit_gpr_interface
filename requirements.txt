@@ -1,4 +1,12 @@
+# UI & data
 streamlit>=1.36.0
 pandas>=2.2.0
 numpy>=1.26.0
 openpyxl>=3.1.2
+requests>=2.31.0
+
+# PyTorch CPU (pour charger tes .pth)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1
+torchvision==0.18.1
+
