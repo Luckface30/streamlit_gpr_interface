@@ -11,11 +11,56 @@ from core.utils import find_col, fuse_top_two_rows_as_header
 from core.interp import clean_and_interpolate_local
 from core.indicateur import sample_eps1_with_indicator, sample_eps2_with_indicator
 
+# ============================================================
+#  Modèles Torch (2 x .pth) — téléchargement + cache + lazy import
+# ============================================================
+import requests
+
+MODELS = {
+    "Mask R-CNN v2": {
+        "url": "https://github.com/Luckface30/streamlit_gpr_interface/releases/download/v1.0.0/mask_rcnn_trained2.pth",
+        "filename": "mask_rcnn_trained2.pth",
+    },
+    "Mask R-CNN v3": {
+        "url": "https://github.com/Luckface30/streamlit_gpr_interface/releases/download/v1.0.0/mask_rcnn_trained_3.pth",
+        "filename": "mask_rcnn_trained_3.pth",
+    },
+}
+
+CACHE_MODELS_DIR = Path(".cache/models")
+CACHE_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _download(url: str, out_path: Path):
+    if out_path.exists():
+        return
+    with st.spinner(f"Téléchargement {out_path.name} (~200 Mo)…"):
+        r = requests.get(url, stream=True, timeout=120)
+        r.raise_for_status()
+        with open(out_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+@st.cache_resource
+def load_model(model_key: str):
+    import torch  # lazy import
+
+    info = MODELS[model_key]
+    path = CACHE_MODELS_DIR / info["filename"]
+    _download(info["url"], path)
+
+    model = torch.load(path, map_location="cpu")
+    model.eval()
+    return model
+
 # ---------------------------
 # Config & chemins
 # ---------------------------
-st.set_page_config(page_title="Outil: Import • Nettoyage • Interpolation • ε₁/ε₂ + Indicateurs • Export", layout="wide")
-st.title("📦 Mini outil (local) — Import • Nettoyage • Interpolation • ε₁/ε₂ + Indicateurs • Export")
+st.set_page_config(
+    page_title="Outil: Import • Nettoyage • Interpolation • ε₁/ε₂ + Indicateurs • Export",
+    layout="wide",
+)
+st.title("📦 Mini outil — Import • Nettoyage • Interpolation • ε₁/ε₂ + Indicateurs • Export")
 
 CACHE_DIR = Path(".cache")
 CACHE_DIR.mkdir(exist_ok=True)
@@ -25,33 +70,19 @@ INTERP_XLSX_PATH = CACHE_DIR / "last_interpolated.xlsx"  # Sauvegarde auto à l'
 # Helpers spécifiques
 # ---------------------------
 def _normalize(s: str) -> str:
-    """
-    Normalise pour comparaisons tolérantes : supprime accents, compacte espaces,
-    met en minuscules, remplace N°/Nº -> N (on retire les symboles de degré/ordinal).
-    """
     if s is None:
         return ""
     s = str(s)
     s = unicodedata.normalize("NFD", s)
-    # retire accents
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    # retire symboles degré/ordinal pour capter "N°"/"Nº"
     s = s.replace("°", "").replace("º", "")
-    # compacte espaces et minuscule
     return re.sub(r"\s+", " ", s).strip().lower()
 
 def is_endoscopie_fin_col(col_name: str) -> bool:
-    """
-    Détecte des variantes du libellé 'Cote de fin de sondage endoscopique (m)'.
-    Règle robuste : présence conjointe de {cote}, {fin}, {sondage}, {endoscop}.
-    """
     n = _normalize(col_name)
     return all(k in n for k in ["cote", "fin", "sondage", "endoscop"])
 
-# Libellés à masquer par défaut (comparaison sur libellé normalisé)
-# ⚠️ NE contient plus "fond de ballast colmaté (m)" -> on souhaite l'interpoler.
 DEFAULT_DROP_LABELS_CANON = {
-    # —— base initiale (moins la ligne "fond de ballast colmaté (m)") ——
     "resistance de pointe (mpa)",
     "sous-couche",
     "couche intermediaire",
@@ -62,9 +93,7 @@ DEFAULT_DROP_LABELS_CANON = {
     "fichier de sondage",
     "ecart type (mpa)",
     "cote de fin sondage endoscopique (m)",
-
-    # —— variantes et champs demandés précédemment ——
-    "n°", "n",  # N° géré explicitement et via normalisation
+    "n°", "n",
     "date",
     "distance de l'axe de la voie (m)",
     "nature",
@@ -83,28 +112,20 @@ DEFAULT_DROP_LABELS_CANON = {
     "nature__2",
     "consistance__1",
     "consistance__2",
-
-    # —— nouveaux à supprimer ——
     "sous-couche cote (m)",
     "couche intermediaire cote (m)",
     "nord",
     "cote de fin sondage panda (m)",
 }
 
-# Cibles par nom à pré-sélectionner dans "Colonnes numériques à interpoler"
 TARGET_NUMERIC_DEFAULTS = {
     "km",
     "ballast cote touche (m)",
     "fond de ballast sain (m)",
-    "fond de ballast colmate (m)",   # orthographe normalisée sans accent
+    "fond de ballast colmate (m)",
 }
 
 def _should_auto_drop(col_name: str) -> bool:
-    """
-    True si la colonne doit être pré-sélectionnée pour suppression.
-    - correspondance exacte avec DEFAULT_DROP_LABELS_CANON (après normalisation)
-    - ou colonne détectée comme 'fin de sondage endoscopique'
-    """
     n = _normalize(col_name)
     if n in DEFAULT_DROP_LABELS_CANON:
         return True
@@ -115,17 +136,26 @@ def _should_auto_drop(col_name: str) -> bool:
 # ---------------------------
 # État
 # ---------------------------
-if "raw_df" not in st.session_state: st.session_state.raw_df = None
-if "processed_df" not in st.session_state: st.session_state.processed_df = None
+if "raw_df" not in st.session_state:
+    st.session_state.raw_df = None
+if "processed_df" not in st.session_state:
+    st.session_state.processed_df = None
 
 # ---------------------------
-# Sidebar paramètres
+# Sidebar paramètres + modèle
 # ---------------------------
 with st.sidebar:
     st.header("⚙️ Paramètres")
     step_cm = st.number_input("Pas d'interpolation (cm)", min_value=1, max_value=1000, value=10, step=1)
     half_window_cm = st.number_input("Fenêtre ± (cm)", min_value=10, max_value=10_000, value=200, step=10)
-    st.caption("Flux: Import → Nettoyage → Interpoler (sauvegarde auto) → ε₁/ε₂ + Indicateurs → Export")
+    st.caption("Flux: Import → Nettoyage → Interpoler → ε₁/ε₂ + Indicateurs → Export")
+
+    st.divider()
+    st.header("🧠 Modèle (Mask R-CNN)")
+    model_key = st.selectbox("Choisir le modèle", list(MODELS.keys()))
+    if st.button("Charger le modèle"):
+        _ = load_model(model_key)
+        st.success(f"{model_key} chargé")
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "1) Import & Nettoyage",
@@ -146,32 +176,27 @@ with tab1:
 
     if up is not None:
         try:
-            # Lecture
             if up.name.lower().endswith(".csv"):
                 raw = pd.read_csv(up, header=None) if merge_headers else pd.read_csv(up)
             else:
                 raw = pd.read_excel(up, header=None) if merge_headers else pd.read_excel(up)
 
-            # Nettoyage des lignes vides du haut (si demandé)
             if merge_headers and skip_blank_top:
                 while len(raw) and raw.iloc[0].isna().all():
                     raw = raw.iloc[1:].reset_index(drop=True)
 
-            # Fusion 2 premières lignes -> en-têtes (si demandé)
             df = fuse_top_two_rows_as_header(raw) if merge_headers else raw.copy()
 
             st.session_state.raw_df = df.copy()
-            st.session_state.processed_df = None  # reset après un nouvel import
+            st.session_state.processed_df = None
 
             st.success(f"Fichier chargé: {up.name} • {df.shape[0]} lignes, {df.shape[1]} colonnes")
             st.dataframe(df.head(50), use_container_width=True)
 
-            # Détection colonnes
             km_guess = find_col(df, ["Km", "KM", "kilometre", "kilometer", "pk", "position_km"])
             pos_col_guess = find_col(df, ["Position", "position"])
             numeric_guess = [c for c in df.columns if c != km_guess and pd.api.types.is_numeric_dtype(df[c])]
 
-            # Auto-exclusion: 'cote de fin de sondage endoscopique (m)'
             auto_excluded = [c for c in df.columns if is_endoscopie_fin_col(c)]
             if auto_excluded:
                 st.info("🛑 Colonne(s) fin de sondage endoscopique détectée(s) et masquée(s) automatiquement : "
@@ -180,58 +205,58 @@ with tab1:
             st.markdown("### Sélection des colonnes")
             c1, c2 = st.columns(2)
             with c1:
-                km_col = st.selectbox("Colonne Km", options=list(df.columns),
-                                      index=(list(df.columns).index(km_guess) if km_guess in list(df.columns) else 0))
+                km_col = st.selectbox(
+                    "Colonne Km",
+                    options=list(df.columns),
+                    index=(list(df.columns).index(km_guess) if km_guess in list(df.columns) else 0),
+                )
             with c2:
-                position_col = st.selectbox("Colonne Position (optionnel)", options=[None] + list(df.columns),
-                                            index=(0 if pos_col_guess is None else (1 + list(df.columns).index(pos_col_guess))))
+                position_col = st.selectbox(
+                    "Colonne Position (optionnel)",
+                    options=[None] + list(df.columns),
+                    index=(0 if pos_col_guess is None else (1 + list(df.columns).index(pos_col_guess))),
+                )
 
-            # Colonnes à supprimer
             st.markdown("### Nettoyage — colonnes à supprimer avant interpolation")
-            # 1) Règle générique: colonnes "Unnamed", vides, etc.
             default_drop = [
                 c for c in df.columns
                 if re.match(r"(?i)^unnamed", str(c)) or str(c).strip() in {"", "None", "NaN"}
             ]
-            # 2) Règle spécifique: libellés fournis (tolérants, gérés par _normalize)
             default_drop_specific = [c for c in df.columns if _should_auto_drop(c)]
-            # 3) Fusion avec l’auto-exclusion endoscopie
             default_drop = sorted(list(set(default_drop + default_drop_specific + auto_excluded)))
 
-            # Colonnes protégées (Km/Position) à ne jamais proposer par défaut
             protected = {km_col}
             if position_col:
                 protected.add(position_col)
 
             drop_candidates = [c for c in df.columns if c not in protected]
-            drop_cols = st.multiselect("Sélectionne les colonnes à supprimer",
-                                       options=drop_candidates,
-                                       default=[c for c in default_drop if c in drop_candidates])
+            drop_cols = st.multiselect(
+                "Sélectionne les colonnes à supprimer",
+                options=drop_candidates,
+                default=[c for c in default_drop if c in drop_candidates],
+            )
 
-            # Colonnes numériques à interpoler (⚠️ exclure celles supprimées + endoscopie fin)
             selectable_cols = [c for c in df.columns if c not in drop_cols and c not in auto_excluded]
-
-            # Pré-sélection par nom (tolérant via _normalize) + ajoute les colonnes numériques détectées
             preferred_numeric = [c for c in selectable_cols if _normalize(c) in TARGET_NUMERIC_DEFAULTS]
-            # Inclure Km visuellement si présent dans les colonnes sélectionnables
             if km_col in selectable_cols and km_col not in preferred_numeric:
                 preferred_numeric = [km_col] + preferred_numeric
 
-            # Concaténer avec la détection auto des numériques (et dédupliquer en conservant l'ordre)
-            numeric_default_ordered = list(dict.fromkeys(preferred_numeric + [c for c in numeric_guess if c in selectable_cols]))
+            numeric_default_ordered = list(dict.fromkeys(
+                preferred_numeric + [c for c in numeric_guess if c in selectable_cols]
+            ))
 
-            numeric_cols = st.multiselect("Colonnes numériques à interpoler (m → seront converties en cm)",
-                                          options=selectable_cols,
-                                          default=numeric_default_ordered)
+            numeric_cols = st.multiselect(
+                "Colonnes numériques à interpoler (m → seront converties en cm)",
+                options=selectable_cols,
+                default=numeric_default_ordered,
+            )
 
-            # Filtre Position optionnel
             if position_col:
                 pos_values = ["— Aucun filtre —"] + sorted(df[position_col].dropna().astype(str).unique().tolist())
                 position_filter_value = st.selectbox("Filtrer Position (optionnel)", options=pos_values)
             else:
                 position_filter_value = None
 
-            # ⚠️ On retire km_col des colonnes numériques à transmettre à la fonction d'interpolation
             numeric_cols_effective = [c for c in numeric_cols if c != km_col]
 
             st.session_state._params = {
